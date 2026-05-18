@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-if [ ! -d "android" ]; then
-  flutter create . --platforms=android --project-name chat_duo_secure --org br.com.chatduo
-fi
+flutter create . --platforms=android --project-name chat_duo_secure --org br.com.chatduo
 
 MANIFEST="android/app/src/main/AndroidManifest.xml"
 if [ -f "$MANIFEST" ] && ! grep -q "android.permission.CAMERA" "$MANIFEST"; then
