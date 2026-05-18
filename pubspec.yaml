@@ -1,0 +1,29 @@
+name: chat_duo_secure
+description: Chat privado para duas pessoas com Supabase, E2EE e chamadas WebRTC.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  supabase_flutter: ^2.9.0
+  cryptography: ^2.7.0
+  flutter_secure_storage: ^9.2.4
+  flutter_webrtc: ^1.4.1
+  image_picker: ^1.1.2
+  record: ^6.0.0
+  just_audio: ^0.9.46
+  path_provider: ^2.1.5
+  path: ^1.9.1
+  intl: ^0.20.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
