@@ -18,7 +18,27 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 class Env {
   static const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
   static const supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
+  static const turnUrl = String.fromEnvironment('TURN_URL');
+  static const turnUsername = String.fromEnvironment('TURN_USERNAME');
+  static const turnPassword = String.fromEnvironment('TURN_PASSWORD');
+
   static bool get ok => supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty;
+
+  static List<Map<String, dynamic>> iceServers() {
+    final servers = <Map<String, dynamic>>[];
+    if (turnUrl.isNotEmpty) {
+      servers.add({
+        'urls': turnUrl,
+        'username': turnUsername,
+        'credential': turnPassword,
+      });
+    }
+    servers.addAll([
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+    ]);
+    return servers;
+  }
 }
 
 Future<void> main() async {
@@ -304,7 +324,7 @@ class ChatService {
         final db = parseDate(b['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0);
         return da.compareTo(db);
       });
-      return list.length > 120 ? list.sublist(list.length - 120) : list;
+      return list.length > 80 ? list.sublist(list.length - 80) : list;
     });
   }
 
@@ -409,7 +429,7 @@ class _LoginPageState extends State<LoginPage> {
                   const SizedBox(height: 20),
                   Text('Chat Duo Secure', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
                   const SizedBox(height: 8),
-                  Text('Privado, moderno e criptografado.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withOpacity(.7))),
+                  Text('Privado, moderno e rápido.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withOpacity(.7))),
                   const SizedBox(height: 28),
                   TextField(controller: email, decoration: input('E-mail', Icons.alternate_email_rounded)),
                   const SizedBox(height: 12),
@@ -541,9 +561,9 @@ class _HomePageState extends State<HomePage> {
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Text('Duo privado', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
                       const SizedBox(height: 8),
-                      Text('Texto, foto, vídeo, áudio e chamadas com a mesma chave do chat nos dois celulares.', style: TextStyle(color: Colors.white.withOpacity(.7))),
+                      Text('Chat, mídia e chamadas rápidas. Para chamadas fora da mesma rede, configure TURN.', style: TextStyle(color: Colors.white.withOpacity(.7))),
                       const SizedBox(height: 18),
-                      Row(children: [Expanded(child: ActionTile(icon: Icons.chat_bubble_rounded, title: 'Chat', sub: 'E2EE', onTap: allowed ? openChat : null)), const SizedBox(width: 12), Expanded(child: ActionTile(icon: Icons.videocam_rounded, title: 'Chamadas', sub: 'WebRTC', onTap: allowed ? openChat : null))]),
+                      Row(children: [Expanded(child: ActionTile(icon: Icons.chat_bubble_rounded, title: 'Chat', sub: 'Abrir', onTap: allowed ? openChat : null)), const SizedBox(width: 12), Expanded(child: ActionTile(icon: Icons.videocam_rounded, title: 'Chamadas', sub: 'WebRTC', onTap: allowed ? openChat : null))]),
                     ]),
                   ),
                 ]),
@@ -664,7 +684,7 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> sendImage() async {
     if (!await requireSecret()) return;
-    final file = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    final file = await picker.pickImage(source: ImageSource.gallery, imageQuality: 78, maxWidth: 1440, maxHeight: 1440);
     if (file == null) return;
     setState(() => mediaMenu = false);
     try {
@@ -677,7 +697,7 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> sendVideo() async {
     if (!await requireSecret()) return;
-    final file = await picker.pickVideo(source: ImageSource.gallery);
+    final file = await picker.pickVideo(source: ImageSource.gallery, maxDuration: const Duration(minutes: 2));
     if (file == null) return;
     setState(() => mediaMenu = false);
     try {
@@ -709,7 +729,7 @@ class _ChatPageState extends State<ChatPage> {
     }
     final dir = await getTemporaryDirectory();
     final path = '${dir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
-    await recorder.start(const RecordConfig(encoder: AudioEncoder.aacLc), path: path);
+    await recorder.start(const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 64000, sampleRate: 44100), path: path);
     if (mounted) setState(() => recording = true);
   }
 
@@ -967,10 +987,11 @@ class _CallPageState extends State<CallPage> {
   String? callId;
   bool micOn = true;
   bool camOn = true;
-  bool remoteReady = false;
+  bool remoteDescriptionReady = false;
   bool ended = false;
+  int seconds = 0;
   final processedCandidates = <String>{};
-  final pendingCandidates = <RTCIceCandidate>[];
+  final pendingLocalCandidates = <RTCIceCandidate>[];
 
   @override
   void initState() {
@@ -1003,26 +1024,48 @@ class _CallPageState extends State<CallPage> {
       startSyncLoop();
       if (mounted) setState(() {});
     } catch (e) {
-      if (mounted) setState(() => status = 'Erro na chamada: $e');
+      if (mounted) setState(() => status = 'Erro: $e');
     }
   }
 
   Future<void> setupPeer() async {
     peer = await createPeerConnection({
-      'iceServers': [
-        {'urls': 'stun:stun.l.google.com:19302'},
-        {'urls': 'stun:stun1.l.google.com:19302'},
-      ],
+      'iceServers': Env.iceServers(),
       'sdpSemantics': 'unified-plan',
+      'bundlePolicy': 'max-bundle',
+      'rtcpMuxPolicy': 'require',
+      'iceCandidatePoolSize': 4,
     });
 
     peer!.onIceCandidate = (candidate) {
       if (candidate.candidate == null) return;
       if (callId == null) {
-        pendingCandidates.add(candidate);
-        return;
+        pendingLocalCandidates.add(candidate);
+      } else {
+        insertCandidate(candidate);
       }
-      insertCandidate(candidate);
+    };
+
+    peer!.onIceConnectionState = (state) {
+      if (!mounted) return;
+      setState(() {
+        status = switch (state) {
+          RTCIceConnectionState.RTCIceConnectionStateConnected => 'Conectado',
+          RTCIceConnectionState.RTCIceConnectionStateCompleted => 'Conectado',
+          RTCIceConnectionState.RTCIceConnectionStateChecking => 'Conectando...',
+          RTCIceConnectionState.RTCIceConnectionStateDisconnected => 'Reconectando...',
+          RTCIceConnectionState.RTCIceConnectionStateFailed => 'Falha na conexão. Use TURN.',
+          RTCIceConnectionState.RTCIceConnectionStateClosed => 'Chamada encerrada',
+          _ => status,
+        };
+      });
+    };
+
+    peer!.onConnectionState = (state) {
+      if (!mounted) return;
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        setState(() => status = 'Conectado');
+      }
     };
 
     peer!.onTrack = (event) {
@@ -1032,7 +1075,23 @@ class _CallPageState extends State<CallPage> {
       }
     };
 
-    localStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': widget.video});
+    final constraints = <String, dynamic>{
+      'audio': {
+        'echoCancellation': true,
+        'noiseSuppression': true,
+        'autoGainControl': true,
+      },
+      'video': widget.video
+          ? {
+              'facingMode': 'user',
+              'width': {'ideal': 640},
+              'height': {'ideal': 480},
+              'frameRate': {'ideal': 24, 'max': 24},
+            }
+          : false,
+    };
+
+    localStream = await navigator.mediaDevices.getUserMedia(constraints);
     localRenderer.srcObject = localStream;
     camOn = widget.video;
     for (final track in localStream!.getTracks()) {
@@ -1043,7 +1102,7 @@ class _CallPageState extends State<CallPage> {
   Future<void> createOutgoingCall() async {
     final other = await chat.otherProfile(widget.chatId);
     final receiverId = other?['id'];
-    final offer = await peer!.createOffer({});
+    final offer = await peer!.createOffer({'offerToReceiveAudio': true, 'offerToReceiveVideo': widget.video});
     await peer!.setLocalDescription(offer);
     final row = await sb.from('calls').insert({
       'chat_id': widget.chatId,
@@ -1054,7 +1113,7 @@ class _CallPageState extends State<CallPage> {
       'offer': {'type': offer.type, 'sdp': offer.sdp},
     }).select().single();
     callId = row['id'].toString();
-    await flushPendingCandidates();
+    await flushLocalCandidates();
     if (mounted) setState(() => status = 'Chamando...');
   }
 
@@ -1062,13 +1121,14 @@ class _CallPageState extends State<CallPage> {
     callId = call['id'].toString();
     final offer = Map<String, dynamic>.from(call['offer'] as Map);
     await peer!.setRemoteDescription(RTCSessionDescription(offer['sdp']?.toString(), offer['type']?.toString()));
-    final answer = await peer!.createAnswer({});
+    remoteDescriptionReady = true;
+    final answer = await peer!.createAnswer({'offerToReceiveAudio': true, 'offerToReceiveVideo': widget.video});
     await peer!.setLocalDescription(answer);
     await sb.from('calls').update({
       'status': 'accepted',
       'answer': {'type': answer.type, 'sdp': answer.sdp},
     }).eq('id', callId!);
-    await flushPendingCandidates();
+    await flushLocalCandidates();
     if (mounted) setState(() => status = 'Conectando...');
   }
 
@@ -1085,16 +1145,20 @@ class _CallPageState extends State<CallPage> {
     });
   }
 
-  Future<void> flushPendingCandidates() async {
-    for (final candidate in List<RTCIceCandidate>.from(pendingCandidates)) {
+  Future<void> flushLocalCandidates() async {
+    for (final candidate in List<RTCIceCandidate>.from(pendingLocalCandidates)) {
       await insertCandidate(candidate);
     }
-    pendingCandidates.clear();
+    pendingLocalCandidates.clear();
   }
 
   void startSyncLoop() {
     timer?.cancel();
-    timer = Timer.periodic(const Duration(seconds: 1), (_) => syncCall());
+    timer = Timer.periodic(const Duration(milliseconds: 650), (_) async {
+      seconds++;
+      await syncCall();
+      if (mounted) setState(() {});
+    });
   }
 
   Future<void> syncCall() async {
@@ -1108,23 +1172,25 @@ class _CallPageState extends State<CallPage> {
         await closeLocal(pop: true, updateRemote: false);
         return;
       }
-      if (!remoteReady && call['answer'] != null) {
+      if (!remoteDescriptionReady && call['answer'] != null) {
         final answer = Map<String, dynamic>.from(call['answer'] as Map);
         await peer!.setRemoteDescription(RTCSessionDescription(answer['sdp']?.toString(), answer['type']?.toString()));
-        remoteReady = true;
+        remoteDescriptionReady = true;
         if (mounted) setState(() => status = 'Conectando...');
       }
+      if (!remoteDescriptionReady) return;
+
       final rows = await sb.from('call_candidates').select().eq('call_id', callId!);
       for (final raw in rows) {
         final row = Map<String, dynamic>.from(raw);
         if (row['user_id'] == uid) continue;
         final id = row['id']?.toString() ?? '';
         if (processedCandidates.contains(id)) continue;
-        processedCandidates.add(id);
         final data = Map<String, dynamic>.from(row['candidate'] as Map);
         final indexRaw = data['sdpMLineIndex'];
         final index = indexRaw is int ? indexRaw : int.tryParse(indexRaw?.toString() ?? '');
         await peer!.addCandidate(RTCIceCandidate(data['candidate']?.toString(), data['sdpMid']?.toString(), index));
+        processedCandidates.add(id);
       }
     } catch (_) {}
   }
@@ -1159,6 +1225,18 @@ class _CallPageState extends State<CallPage> {
     setState(() {});
   }
 
+  Future<void> switchCamera() async {
+    final tracks = localStream?.getVideoTracks() ?? <MediaStreamTrack>[];
+    if (tracks.isEmpty) return;
+    await Helper.switchCamera(tracks.first);
+  }
+
+  String callTime() {
+    final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
+    final secs = (seconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$secs';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1170,7 +1248,7 @@ class _CallPageState extends State<CallPage> {
               Row(children: [
                 IconButton(onPressed: () => closeLocal(), icon: const Icon(Icons.arrow_back_rounded)),
                 Expanded(child: Text(widget.video ? 'Chamada de vídeo' : 'Chamada de áudio', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900))),
-                const Icon(Icons.lock_rounded),
+                Text(callTime(), style: const TextStyle(fontWeight: FontWeight.w800)),
               ]),
               const SizedBox(height: 14),
               Expanded(
@@ -1194,11 +1272,13 @@ class _CallPageState extends State<CallPage> {
               const SizedBox(height: 18),
               Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                 CallButton(icon: micOn ? Icons.mic_rounded : Icons.mic_off_rounded, onTap: toggleMic),
-                const SizedBox(width: 16),
+                const SizedBox(width: 14),
                 CallButton(icon: Icons.call_end_rounded, danger: true, onTap: () => closeLocal()),
                 if (widget.video) ...[
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 14),
                   CallButton(icon: camOn ? Icons.videocam_rounded : Icons.videocam_off_rounded, onTap: toggleCamera),
+                  const SizedBox(width: 14),
+                  CallButton(icon: Icons.cameraswitch_rounded, onTap: switchCamera),
                 ],
               ]),
             ]),
@@ -1221,10 +1301,10 @@ class CallButton extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(999),
       child: Container(
-        width: 64,
-        height: 64,
+        width: 62,
+        height: 62,
         decoration: BoxDecoration(shape: BoxShape.circle, color: danger ? Colors.redAccent : Colors.white.withOpacity(.14), border: Border.all(color: Colors.white.withOpacity(.12))),
-        child: Icon(icon, size: 30),
+        child: Icon(icon, size: 29),
       ),
     );
   }
