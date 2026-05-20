@@ -6,6 +6,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -53,6 +54,80 @@ InputDecoration field(String label, IconData icon) {
     fillColor: Colors.white.withOpacity(.08),
     border: OutlineInputBorder(borderRadius: BorderRadius.circular(22), borderSide: BorderSide.none),
   );
+}
+
+class MessageMemoryCache {
+  MessageMemoryCache._();
+  static final Map<String, List<Map<String, dynamic>>> _cache = {};
+
+  static List<Map<String, dynamic>> get(String chatId) {
+    return List<Map<String, dynamic>>.from(_cache[chatId] ?? const []);
+  }
+
+  static void set(String chatId, List<Map<String, dynamic>> messages) {
+    _cache[chatId] = normalizeMessages(messages);
+  }
+}
+
+List<Map<String, dynamic>> normalizeMessages(List<Map<String, dynamic>> messages) {
+  final byId = <String, Map<String, dynamic>>{};
+  for (final raw in messages) {
+    final msg = Map<String, dynamic>.from(raw);
+    final id = msg['id']?.toString() ?? '${msg['created_at']}-${msg['sender_id']}';
+    byId[id] = msg;
+  }
+  final sorted = byId.values.toList();
+  sorted.sort((a, b) {
+    final da = DateTime.tryParse(a['created_at']?.toString() ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final db = DateTime.tryParse(b['created_at']?.toString() ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
+    return da.compareTo(db);
+  });
+  return sorted;
+}
+
+DateTime? messageDate(Map<String, dynamic> msg) {
+  return DateTime.tryParse(msg['created_at']?.toString() ?? '')?.toLocal();
+}
+
+String messageTime(Map<String, dynamic> msg) {
+  final dt = messageDate(msg);
+  if (dt == null) return '';
+  return DateFormat('HH:mm').format(dt);
+}
+
+String dateLabel(DateTime date) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final messageDay = DateTime(date.year, date.month, date.day);
+  final diff = today.difference(messageDay).inDays;
+  if (diff == 0) return 'Hoje';
+  if (diff == 1) return 'Ontem';
+  return DateFormat('dd/MM/yyyy').format(date);
+}
+
+List<TimelineItem> timelineItems(List<Map<String, dynamic>> messages) {
+  final items = <TimelineItem>[];
+  DateTime? lastDay;
+  for (final msg in messages) {
+    final dt = messageDate(msg);
+    if (dt != null) {
+      final day = DateTime(dt.year, dt.month, dt.day);
+      if (lastDay == null || day != lastDay) {
+        items.add(TimelineItem.date(dateLabel(dt)));
+        lastDay = day;
+      }
+    }
+    items.add(TimelineItem.message(msg));
+  }
+  return items;
+}
+
+class TimelineItem {
+  TimelineItem.date(this.label) : message = null;
+  TimelineItem.message(this.message) : label = null;
+  final String? label;
+  final Map<String, dynamic>? message;
+  bool get isDate => label != null;
 }
 
 class ChatDuoApp extends StatelessWidget {
@@ -332,9 +407,13 @@ class ChatService {
   }
 
   Stream<List<Map<String, dynamic>>> messages(String chatId) {
-    return sb.from('messages').stream(primaryKey: ['id']).eq('chat_id', chatId).order('created_at').map(
-          (rows) => rows.map((row) => Map<String, dynamic>.from(row)).toList(),
-        );
+    return sb
+        .from('messages')
+        .stream(primaryKey: ['id'])
+        .eq('chat_id', chatId)
+        .order('created_at')
+        .limit(120)
+        .map((rows) => normalizeMessages(rows.map((row) => Map<String, dynamic>.from(row)).toList()));
   }
 
   Future<void> sendText(String chatId, String text) async {
@@ -684,6 +763,7 @@ class _ChatPageState extends State<ChatPage> {
   bool sending = false;
   bool menuOpen = false;
   bool recording = false;
+  int lastRenderedCount = 0;
 
   @override
   void dispose() {
@@ -693,6 +773,16 @@ class _ChatPageState extends State<ChatPage> {
     super.dispose();
   }
 
+  void scheduleScrollToBottom({bool force = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!scroll.hasClients) return;
+      final distanceFromBottom = scroll.position.maxScrollExtent - scroll.offset;
+      if (force || distanceFromBottom < 260) {
+        scroll.animateTo(scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 260), curve: Curves.easeOut);
+      }
+    });
+  }
+
   Future<void> send() async {
     if (sending) return;
     final text = controller.text;
@@ -700,6 +790,7 @@ class _ChatPageState extends State<ChatPage> {
     setState(() => sending = true);
     try {
       await chat.sendText(widget.chatId, text);
+      scheduleScrollToBottom(force: true);
     } catch (e) {
       if (mounted) toast(context, 'Erro: $e');
     } finally {
@@ -713,6 +804,7 @@ class _ChatPageState extends State<ChatPage> {
     if (mounted) setState(() => menuOpen = false);
     try {
       await chat.sendMedia(widget.chatId, 'image', file);
+      scheduleScrollToBottom(force: true);
     } catch (e) {
       if (mounted) toast(context, 'Erro ao enviar foto: $e');
     }
@@ -724,6 +816,7 @@ class _ChatPageState extends State<ChatPage> {
     if (mounted) setState(() => menuOpen = false);
     try {
       await chat.sendMedia(widget.chatId, 'video', file);
+      scheduleScrollToBottom(force: true);
     } catch (e) {
       if (mounted) toast(context, 'Erro ao enviar vídeo: $e');
     }
@@ -736,6 +829,7 @@ class _ChatPageState extends State<ChatPage> {
       if (path == null) return;
       try {
         await chat.sendMedia(widget.chatId, 'audio', XFile(path, name: p.basename(path), mimeType: 'audio/aac'));
+        scheduleScrollToBottom(force: true);
       } catch (e) {
         if (mounted) toast(context, 'Erro ao enviar áudio: $e');
       }
@@ -753,8 +847,51 @@ class _ChatPageState extends State<ChatPage> {
     if (mounted) setState(() => recording = true);
   }
 
+  Widget buildMessageList(List<Map<String, dynamic>> messages, bool isWaiting) {
+    final normalized = normalizeMessages(messages);
+    MessageMemoryCache.set(widget.chatId, normalized);
+    final items = timelineItems(normalized);
+    if (normalized.length != lastRenderedCount) {
+      lastRenderedCount = normalized.length;
+      scheduleScrollToBottom();
+    }
+
+    if (items.isEmpty) {
+      return Center(child: Text(isWaiting ? 'Carregando conversa segura...' : 'Comece a conversa segura 🔐'));
+    }
+
+    return Stack(
+      children: [
+        ListView.builder(
+          controller: scroll,
+          padding: const EdgeInsets.fromLTRB(0, 10, 0, 10),
+          itemCount: items.length,
+          itemBuilder: (context, index) {
+            final item = items[index];
+            if (item.isDate) return DateSeparator(label: item.label!);
+            return MessageBubble(chatId: widget.chatId, message: item.message!, chat: chat);
+          },
+        ),
+        if (isWaiting)
+          Positioned(
+            top: 8,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(color: Colors.black.withOpacity(.45), borderRadius: BorderRadius.circular(999)),
+                child: const Text('Sincronizando...', style: TextStyle(fontSize: 12)),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final cached = MessageMemoryCache.get(widget.chatId);
     return Scaffold(
       body: DuoBackground(
         child: SafeArea(
@@ -783,16 +920,12 @@ class _ChatPageState extends State<ChatPage> {
               ),
               Expanded(
                 child: StreamBuilder<List<Map<String, dynamic>>>(
+                  initialData: cached,
                   stream: chat.messages(widget.chatId),
                   builder: (context, snap) {
-                    final messages = snap.data ?? [];
-                    if (messages.isEmpty) return const Center(child: Text('Comece a conversa segura 🔐'));
-                    return ListView.builder(
-                      controller: scroll,
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      itemCount: messages.length,
-                      itemBuilder: (context, i) => MessageBubble(chatId: widget.chatId, message: messages[i], chat: chat),
-                    );
+                    final waiting = snap.connectionState == ConnectionState.waiting && cached.isEmpty;
+                    final messages = snap.data ?? cached;
+                    return buildMessageList(messages, waiting);
                   },
                 ),
               ),
@@ -832,6 +965,23 @@ class _ChatPageState extends State<ChatPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class DateSeparator extends StatelessWidget {
+  const DateSeparator({super.key, required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(color: Colors.black.withOpacity(.35), borderRadius: BorderRadius.circular(999), border: Border.all(color: Colors.white.withOpacity(.08))),
+        child: Text(label, style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(.75), fontWeight: FontWeight.w700)),
       ),
     );
   }
@@ -887,6 +1037,20 @@ class _MessageBubbleState extends State<MessageBubble> {
     }
   }
 
+  Widget trailingInfo() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.lock_rounded, size: 12),
+          const SizedBox(width: 4),
+          Text(messageTime(widget.message), style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(.7))),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final type = widget.message['type']?.toString() ?? 'text';
@@ -898,16 +1062,21 @@ class _MessageBubbleState extends State<MessageBubble> {
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * .78),
-        margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           gradient: mine ? const LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF5148D9)]) : null,
           color: mine ? null : Colors.white.withOpacity(.09),
           borderRadius: BorderRadius.only(topLeft: const Radius.circular(22), topRight: const Radius.circular(22), bottomLeft: Radius.circular(mine ? 22 : 6), bottomRight: Radius.circular(mine ? 6 : 22)),
         ),
-        child: isText
-            ? FutureBuilder<String>(future: widget.chat.decrypt(widget.chatId, widget.message), builder: (context, snap) => Text(snap.data ?? '...', style: const TextStyle(fontSize: 15.5)))
-            : Column(
+        child: Column(
+          crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isText)
+              FutureBuilder<String>(future: widget.chat.decrypt(widget.chatId, widget.message), builder: (context, snap) => Text(snap.data ?? '...', style: const TextStyle(fontSize: 15.5)))
+            else
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -920,6 +1089,9 @@ class _MessageBubbleState extends State<MessageBubble> {
                   ],
                 ],
               ),
+            trailingInfo(),
+          ],
+        ),
       ),
     );
   }
