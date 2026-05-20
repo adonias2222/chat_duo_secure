@@ -34,14 +34,15 @@ void toast(BuildContext context, String text) {
 }
 
 String firstLetter(String? value) {
-  final v = (value ?? '').trim();
-  return v.isEmpty ? 'U' : v.characters.first.toUpperCase();
+  final clean = (value ?? '').trim();
+  return clean.isEmpty ? 'U' : clean.characters.first.toUpperCase();
 }
 
 DateTime? parseDate(dynamic value) => DateTime.tryParse(value?.toString() ?? '')?.toLocal();
+
 String hourOf(dynamic value) {
-  final dt = parseDate(value);
-  return dt == null ? '' : DateFormat('HH:mm').format(dt);
+  final date = parseDate(value);
+  return date == null ? '' : DateFormat('HH:mm').format(date);
 }
 
 String dayLabel(DateTime date) {
@@ -66,6 +67,7 @@ InputDecoration input(String label, IconData icon) {
 
 class ChatDuoApp extends StatelessWidget {
   const ChatDuoApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -84,6 +86,7 @@ class ChatDuoApp extends StatelessWidget {
 
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
+
   @override
   Widget build(BuildContext context) {
     if (!Env.ok) return const SetupPage();
@@ -97,6 +100,7 @@ class AuthGate extends StatelessWidget {
 class Background extends StatelessWidget {
   const Background({super.key, required this.child});
   final Widget child;
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -116,6 +120,7 @@ class GlassCard extends StatelessWidget {
   const GlassCard({super.key, required this.child, this.padding = const EdgeInsets.all(20)});
   final Widget child;
   final EdgeInsetsGeometry padding;
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -134,6 +139,7 @@ class GlassCard extends StatelessWidget {
 
 class SetupPage extends StatelessWidget {
   const SetupPage({super.key});
+
   @override
   Widget build(BuildContext context) {
     return const Scaffold(
@@ -238,10 +244,13 @@ class ChatService {
   Future<String?> ensureChat() async {
     final me = await sb.from('profiles').select('is_allowed').eq('id', uid).maybeSingle();
     if (me?['is_allowed'] != true) return null;
+
     final existing = await sb.from('duo_chat').select().or('user_one.eq.$uid,user_two.eq.$uid').limit(1);
     if (existing.isNotEmpty) return existing.first['id'].toString();
+
     final partners = await sb.from('profiles').select('id').eq('is_allowed', true).neq('id', uid).limit(1);
     if (partners.isEmpty) return null;
+
     final created = await sb.from('duo_chat').insert({'user_one': uid, 'user_two': partners.first['id']}).select().single();
     return created['id'].toString();
   }
@@ -253,6 +262,7 @@ class ChatService {
   }
 
   Future<bool> hasSecret(String chatId) => crypto.hasSecret(chatId);
+
   Future<void> saveSecret(String chatId, String value) => crypto.saveSecret(chatId, value);
 
   Stream<List<Map<String, dynamic>>> messages(String chatId) {
@@ -276,7 +286,7 @@ class ChatService {
   }
 
   Future<String> decrypt(String chatId, Map<String, dynamic> msg) async {
-    if (msg['type'] != 'text') return 'Mídia protegida. Atualização de mídia será reativada depois.';
+    if (msg['type'] != 'text') return 'Mídia protegida. Reativaremos mídia na próxima etapa.';
     try {
       return await crypto.decryptText(msg, chatId);
     } catch (_) {
@@ -323,23 +333,20 @@ class _LoginPageState extends State<LoginPage> {
           child: Center(
             child: SingleChildScrollView(
               child: GlassCard(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Container(width: 88, height: 88, decoration: BoxDecoration(borderRadius: BorderRadius.circular(30), gradient: const LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF00E5FF)])), child: const Icon(Icons.shield_rounded, size: 46)),
-                    const SizedBox(height: 20),
-                    Text('Chat Duo Secure', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
-                    const SizedBox(height: 8),
-                    Text('Privado, moderno e criptografado.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withOpacity(.7))),
-                    const SizedBox(height: 28),
-                    TextField(controller: email, decoration: input('E-mail', Icons.alternate_email_rounded)),
-                    const SizedBox(height: 12),
-                    TextField(controller: pass, obscureText: true, decoration: input('Senha', Icons.lock_rounded)),
-                    const SizedBox(height: 18),
-                    FilledButton.icon(onPressed: loading ? null : submit, icon: loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.arrow_forward_rounded), label: const Text('Entrar')),
-                    TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RegisterPage())), child: const Text('Criar conta')),
-                  ],
-                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Container(width: 88, height: 88, decoration: BoxDecoration(borderRadius: BorderRadius.circular(30), gradient: const LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF00E5FF)])), child: const Icon(Icons.shield_rounded, size: 46)),
+                  const SizedBox(height: 20),
+                  Text('Chat Duo Secure', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 8),
+                  Text('Privado, moderno e criptografado.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withOpacity(.7))),
+                  const SizedBox(height: 28),
+                  TextField(controller: email, decoration: input('E-mail', Icons.alternate_email_rounded)),
+                  const SizedBox(height: 12),
+                  TextField(controller: pass, obscureText: true, decoration: input('Senha', Icons.lock_rounded)),
+                  const SizedBox(height: 18),
+                  FilledButton.icon(onPressed: loading ? null : submit, icon: loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.arrow_forward_rounded), label: const Text('Entrar')),
+                  TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RegisterPage())), child: const Text('Criar conta')),
+                ]),
               ),
             ),
           ),
@@ -510,6 +517,7 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> {
   final controller = TextEditingController();
+  final secretController = TextEditingController();
   final scroll = ScrollController();
   final chat = ChatService();
   bool sending = false;
@@ -519,58 +527,37 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => checkSecret());
+    checkSecret();
   }
 
   @override
   void dispose() {
     controller.dispose();
+    secretController.dispose();
     scroll.dispose();
     super.dispose();
   }
 
   Future<void> checkSecret() async {
     final ok = await chat.hasSecret(widget.chatId);
-    if (!mounted) return;
-    setState(() => secretReady = ok);
-    if (!ok) await promptSecret();
+    if (mounted) setState(() => secretReady = ok);
   }
 
-  Future<bool> promptSecret() async {
-    final c = TextEditingController();
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('Chave do chat'),
-        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Digite a mesma chave nos dois celulares. Ela fica salva só no aparelho e protege as mensagens novas.'),
-          const SizedBox(height: 14),
-          TextField(controller: c, obscureText: true, decoration: input('Chave combinada', Icons.key_rounded)),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Depois')),
-          FilledButton(onPressed: () async {
-            try {
-              await chat.saveSecret(widget.chatId, c.text);
-              if (context.mounted) Navigator.pop(context, true);
-            } catch (e) {
-              if (context.mounted) toast(context, '$e');
-            }
-          }, child: const Text('Salvar')),
-        ],
-      ),
-    );
-    c.dispose();
-    final ok = result == true || await chat.hasSecret(widget.chatId);
-    if (mounted) setState(() => secretReady = ok);
-    return ok;
+  Future<void> saveSecretFromInput() async {
+    try {
+      await chat.saveSecret(widget.chatId, secretController.text);
+      secretController.clear();
+      await checkSecret();
+      if (mounted) toast(context, 'Chave salva neste aparelho.');
+    } catch (e) {
+      if (mounted) toast(context, '$e');
+    }
   }
 
   Future<bool> requireSecret() async {
     if (await chat.hasSecret(widget.chatId)) return true;
-    toast(context, 'Defina a chave do chat primeiro.');
-    return promptSecret();
+    if (mounted) toast(context, 'Digite e salve a chave do chat primeiro.');
+    return false;
   }
 
   void scrollBottom({bool force = false}) {
@@ -603,17 +590,37 @@ class _ChatPageState extends State<ChatPage> {
     final widgets = <Widget>[];
     DateTime? lastDay;
     for (final msg in messages) {
-      final dt = parseDate(msg['created_at']);
-      if (dt != null) {
-        final day = DateTime(dt.year, dt.month, dt.day);
+      final date = parseDate(msg['created_at']);
+      if (date != null) {
+        final day = DateTime(date.year, date.month, date.day);
         if (lastDay == null || day != lastDay) {
-          widgets.add(DateChip(label: dayLabel(dt)));
+          widgets.add(DateChip(label: dayLabel(date)));
           lastDay = day;
         }
       }
       widgets.add(MessageBubble(chatId: widget.chatId, message: msg, chat: chat));
     }
     return widgets;
+  }
+
+  Widget secretPanel() {
+    if (secretReady) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: const Color(0xFFFFD166).withOpacity(.12), borderRadius: BorderRadius.circular(22), border: Border.all(color: const Color(0xFFFFD166).withOpacity(.35))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Defina a chave do chat', style: TextStyle(fontWeight: FontWeight.w900)),
+        const SizedBox(height: 6),
+        Text('Coloque exatamente a mesma chave nos dois celulares. Ela fica salva só no aparelho.', style: TextStyle(color: Colors.white.withOpacity(.75), fontSize: 12)),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(child: TextField(controller: secretController, obscureText: true, decoration: input('Chave combinada', Icons.key_rounded))),
+          const SizedBox(width: 8),
+          IconButton.filled(onPressed: saveSecretFromInput, icon: const Icon(Icons.check_rounded)),
+        ]),
+      ]),
+    );
   }
 
   @override
@@ -634,11 +641,12 @@ class _ChatPageState extends State<ChatPage> {
                     CircleAvatar(backgroundColor: const Color(0xFF6C63FF), child: Text(firstLetter(name))),
                     const SizedBox(width: 12),
                     Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(name, style: const TextStyle(fontWeight: FontWeight.w900)), Text(secretReady ? 'chave local ativa' : 'defina a chave do chat', style: TextStyle(fontSize: 12, color: secretReady ? const Color(0xFF71F7A5) : const Color(0xFFFFD166)))])),
-                    IconButton.filledTonal(onPressed: promptSecret, icon: const Icon(Icons.key_rounded)),
+                    IconButton.filledTonal(onPressed: () => setState(() => secretReady = false), icon: const Icon(Icons.key_rounded)),
                   ]),
                 );
               },
             ),
+            secretPanel(),
             Expanded(
               child: StreamBuilder<List<Map<String, dynamic>>>(
                 stream: chat.messages(widget.chatId),
@@ -701,14 +709,11 @@ class MessageBubble extends StatelessWidget {
           color: mine ? null : Colors.white.withOpacity(.09),
           borderRadius: BorderRadius.only(topLeft: const Radius.circular(22), topRight: const Radius.circular(22), bottomLeft: Radius.circular(mine ? 22 : 6), bottomRight: Radius.circular(mine ? 6 : 22)),
         ),
-        child: Column(
-          crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          children: [
-            FutureBuilder<String>(future: chat.decrypt(chatId, message), builder: (context, snap) => Text(snap.data ?? '...', style: const TextStyle(fontSize: 15.5))),
-            const SizedBox(height: 4),
-            Row(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.lock_rounded, size: 12), const SizedBox(width: 4), Text(hourOf(message['created_at']), style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(.7)))]),
-          ],
-        ),
+        child: Column(crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
+          FutureBuilder<String>(future: chat.decrypt(chatId, message), builder: (context, snap) => Text(snap.data ?? '...', style: const TextStyle(fontSize: 15.5))),
+          const SizedBox(height: 4),
+          Row(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.lock_rounded, size: 12), const SizedBox(width: 4), Text(hourOf(message['created_at']), style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(.7)))]),
+        ]),
       ),
     );
   }
