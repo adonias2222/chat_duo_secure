@@ -1,8 +1,15 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class Env {
@@ -28,6 +35,26 @@ class MyApp extends StatelessWidget {
 SupabaseClient get sb => Supabase.instance.client;
 String get uid => sb.auth.currentUser!.id;
 
+String firstLetter(String? text) {
+  final value = (text ?? '').trim();
+  if (value.isEmpty) return 'U';
+  return value.characters.first.toUpperCase();
+}
+
+void toast(BuildContext context, String text) {
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+}
+
+InputDecoration field(String label, IconData icon) {
+  return InputDecoration(
+    labelText: label,
+    prefixIcon: Icon(icon),
+    filled: true,
+    fillColor: Colors.white.withOpacity(.08),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(22), borderSide: BorderSide.none),
+  );
+}
+
 class ChatDuoApp extends StatelessWidget {
   const ChatDuoApp({super.key});
 
@@ -49,6 +76,7 @@ class ChatDuoApp extends StatelessWidget {
 
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
+
   @override
   Widget build(BuildContext context) {
     if (!Env.ok) return const SetupPage();
@@ -63,6 +91,7 @@ class AuthGate extends StatelessWidget {
 
 class SetupPage extends StatelessWidget {
   const SetupPage({super.key});
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -90,6 +119,7 @@ class SetupPage extends StatelessWidget {
 class DuoBackground extends StatelessWidget {
   const DuoBackground({super.key, required this.child});
   final Widget child;
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -115,6 +145,7 @@ class _Glow extends StatelessWidget {
   const _Glow({required this.size, required this.color});
   final double size;
   final Color color;
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -132,6 +163,7 @@ class GlassCard extends StatelessWidget {
   const GlassCard({super.key, required this.child, this.padding = const EdgeInsets.all(20)});
   final Widget child;
   final EdgeInsetsGeometry padding;
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -146,20 +178,6 @@ class GlassCard extends StatelessWidget {
       child: child,
     );
   }
-}
-
-InputDecoration field(String label, IconData icon) {
-  return InputDecoration(
-    labelText: label,
-    prefixIcon: Icon(icon),
-    filled: true,
-    fillColor: Colors.white.withOpacity(.08),
-    border: OutlineInputBorder(borderRadius: BorderRadius.circular(22), borderSide: BorderSide.none),
-  );
-}
-
-void toast(BuildContext context, String text) {
-  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 }
 
 class E2eeService {
@@ -224,6 +242,30 @@ class E2eeService {
     );
     return utf8.decode(clear);
   }
+
+  Future<EncryptedBytes> encryptBytes(Uint8List bytes, SecretKey key) async {
+    final box = await _aes.encrypt(bytes, secretKey: key);
+    return EncryptedBytes(
+      bytes: Uint8List.fromList(box.cipherText),
+      nonce: base64Encode(box.nonce),
+      mac: base64Encode(box.mac.bytes),
+    );
+  }
+
+  Future<Uint8List> decryptBytes(Uint8List bytes, String nonce, String mac, SecretKey key) async {
+    final clear = await _aes.decrypt(
+      SecretBox(bytes, nonce: base64Decode(nonce), mac: Mac(base64Decode(mac))),
+      secretKey: key,
+    );
+    return Uint8List.fromList(clear);
+  }
+}
+
+class EncryptedBytes {
+  const EncryptedBytes({required this.bytes, required this.nonce, required this.mac});
+  final Uint8List bytes;
+  final String nonce;
+  final String mac;
 }
 
 class AuthService {
@@ -303,6 +345,39 @@ class ChatService {
     await sb.from('duo_chat').update({'updated_at': DateTime.now().toIso8601String()}).eq('id', chatId);
   }
 
+  Future<void> sendMedia(String chatId, String type, XFile file) async {
+    final bytes = await file.readAsBytes();
+    final encrypted = await crypto.encryptBytes(bytes, await key(chatId));
+    final safeName = p.basename(file.path.isEmpty ? file.name : file.path);
+    final storagePath = 'duo/$chatId/${DateTime.now().microsecondsSinceEpoch}_$type.enc';
+
+    await sb.storage.from('chat-media').uploadBinary(
+          storagePath,
+          encrypted.bytes,
+          fileOptions: const FileOptions(contentType: 'application/octet-stream', upsert: false),
+        );
+
+    await sb.from('messages').insert({
+      'chat_id': chatId,
+      'sender_id': uid,
+      'type': type,
+      'nonce': encrypted.nonce,
+      'mac': encrypted.mac,
+      'media_path': storagePath,
+      'file_name': safeName,
+      'mime_type': file.mimeType ?? type,
+      'file_size': bytes.length,
+    });
+    await sb.from('duo_chat').update({'updated_at': DateTime.now().toIso8601String()}).eq('id', chatId);
+  }
+
+  Future<Uint8List> downloadMedia(String chatId, Map<String, dynamic> message) async {
+    final storagePath = message['media_path']?.toString();
+    if (storagePath == null || storagePath.isEmpty) throw Exception('Mídia sem caminho no Storage.');
+    final encrypted = await sb.storage.from('chat-media').download(storagePath);
+    return crypto.decryptBytes(Uint8List.fromList(encrypted), message['nonce'].toString(), message['mac'].toString(), await key(chatId));
+  }
+
   Future<String> decrypt(String chatId, Map<String, dynamic> message) async {
     try {
       return await crypto.decryptText(message, await key(chatId));
@@ -356,10 +431,7 @@ class _LoginPageState extends State<LoginPage> {
                     Container(
                       width: 88,
                       height: 88,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(30),
-                        gradient: const LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF00E5FF)]),
-                      ),
+                      decoration: BoxDecoration(borderRadius: BorderRadius.circular(30), gradient: const LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF00E5FF)])),
                       child: const Icon(Icons.shield_rounded, size: 46),
                     ),
                     const SizedBox(height: 20),
@@ -371,15 +443,8 @@ class _LoginPageState extends State<LoginPage> {
                     const SizedBox(height: 12),
                     TextField(controller: pass, obscureText: true, decoration: field('Senha', Icons.lock_rounded)),
                     const SizedBox(height: 18),
-                    FilledButton.icon(
-                      onPressed: loading ? null : submit,
-                      icon: loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.arrow_forward_rounded),
-                      label: const Text('Entrar'),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RegisterPage())),
-                      child: const Text('Criar conta'),
-                    ),
+                    FilledButton.icon(onPressed: loading ? null : submit, icon: loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.arrow_forward_rounded), label: const Text('Entrar')),
+                    TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RegisterPage())), child: const Text('Criar conta')),
                   ],
                 ),
               ),
@@ -438,12 +503,7 @@ class _RegisterPageState extends State<RegisterPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Row(
-                      children: [
-                        IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back_rounded)),
-                        Text('Criar conta', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
-                      ],
-                    ),
+                    Row(children: [IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back_rounded)), Text('Criar conta', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900))]),
                     const SizedBox(height: 18),
                     TextField(controller: name, decoration: field('Nome', Icons.person_rounded)),
                     const SizedBox(height: 12),
@@ -451,11 +511,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     const SizedBox(height: 12),
                     TextField(controller: pass, obscureText: true, decoration: field('Senha', Icons.lock_rounded)),
                     const SizedBox(height: 18),
-                    FilledButton.icon(
-                      onPressed: loading ? null : submit,
-                      icon: loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.verified_user_rounded),
-                      label: const Text('Cadastrar'),
-                    ),
+                    FilledButton.icon(onPressed: loading ? null : submit, icon: loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.verified_user_rounded), label: const Text('Cadastrar')),
                   ],
                 ),
               ),
@@ -504,8 +560,9 @@ class _HomePageState extends State<HomePage> {
           child: FutureBuilder<Map<String, dynamic>?>(
             future: profile(),
             builder: (context, snap) {
-              final p = snap.data;
-              final allowed = p?['is_allowed'] == true;
+              final pData = snap.data;
+              final allowed = pData?['is_allowed'] == true;
+              final name = pData?['name']?.toString();
               return Padding(
                 padding: const EdgeInsets.all(18),
                 child: Column(
@@ -513,13 +570,13 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     Row(
                       children: [
-                        CircleAvatar(radius: 28, backgroundColor: const Color(0xFF6C63FF), child: Text((p?['name']?.toString().characters.firstOrNull ?? 'U').toUpperCase())),
+                        CircleAvatar(radius: 28, backgroundColor: const Color(0xFF6C63FF), child: Text(firstLetter(name))),
                         const SizedBox(width: 14),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('Olá, ${p?['name'] ?? 'Usuário'}', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                              Text('Olá, ${name ?? 'Usuário'}', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
                               Text(allowed ? 'Acesso liberado' : 'Aguardando liberação', style: TextStyle(color: allowed ? const Color(0xFF71F7A5) : const Color(0xFFFFD166))),
                             ],
                           ),
@@ -534,7 +591,7 @@ class _HomePageState extends State<HomePage> {
                         children: [
                           Text('Duo privado', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
                           const SizedBox(height: 8),
-                          Text('Chat criptografado para duas pessoas. Mídias e chamadas entram nas próximas atualizações.', style: TextStyle(color: Colors.white.withOpacity(.7))),
+                          Text('Chat criptografado para duas pessoas, com texto, foto, vídeo e áudio protegido.', style: TextStyle(color: Colors.white.withOpacity(.7))),
                           const SizedBox(height: 18),
                           Row(
                             children: [
@@ -622,12 +679,17 @@ class _ChatPageState extends State<ChatPage> {
   final controller = TextEditingController();
   final scroll = ScrollController();
   final chat = ChatService();
+  final picker = ImagePicker();
+  final recorder = AudioRecorder();
   bool sending = false;
+  bool menuOpen = false;
+  bool recording = false;
 
   @override
   void dispose() {
     controller.dispose();
     scroll.dispose();
+    recorder.dispose();
     super.dispose();
   }
 
@@ -643,6 +705,52 @@ class _ChatPageState extends State<ChatPage> {
     } finally {
       if (mounted) setState(() => sending = false);
     }
+  }
+
+  Future<void> sendImage() async {
+    final file = await picker.pickImage(source: ImageSource.gallery, imageQuality: 86);
+    if (file == null) return;
+    if (mounted) setState(() => menuOpen = false);
+    try {
+      await chat.sendMedia(widget.chatId, 'image', file);
+    } catch (e) {
+      if (mounted) toast(context, 'Erro ao enviar foto: $e');
+    }
+  }
+
+  Future<void> sendVideo() async {
+    final file = await picker.pickVideo(source: ImageSource.gallery);
+    if (file == null) return;
+    if (mounted) setState(() => menuOpen = false);
+    try {
+      await chat.sendMedia(widget.chatId, 'video', file);
+    } catch (e) {
+      if (mounted) toast(context, 'Erro ao enviar vídeo: $e');
+    }
+  }
+
+  Future<void> toggleVoice() async {
+    if (recording) {
+      final path = await recorder.stop();
+      setState(() => recording = false);
+      if (path == null) return;
+      try {
+        await chat.sendMedia(widget.chatId, 'audio', XFile(path, name: p.basename(path), mimeType: 'audio/aac'));
+      } catch (e) {
+        if (mounted) toast(context, 'Erro ao enviar áudio: $e');
+      }
+      return;
+    }
+
+    final permitted = await recorder.hasPermission();
+    if (!permitted) {
+      if (mounted) toast(context, 'Permita o uso do microfone para gravar áudio.');
+      return;
+    }
+    final dir = await getTemporaryDirectory();
+    final path = '${dir.path}/duo_voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+    await recorder.start(const RecordConfig(encoder: AudioEncoder.aacLc), path: path);
+    if (mounted) setState(() => recording = true);
   }
 
   @override
@@ -662,7 +770,7 @@ class _ChatPageState extends State<ChatPage> {
                     child: Row(
                       children: [
                         IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back_rounded)),
-                        CircleAvatar(backgroundColor: const Color(0xFF6C63FF), child: Text(name.characters.first.toUpperCase())),
+                        CircleAvatar(backgroundColor: const Color(0xFF6C63FF), child: Text(firstLetter(name))),
                         const SizedBox(width: 12),
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(name, style: const TextStyle(fontWeight: FontWeight.w900)), Text('criptografia ponta a ponta', style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(.65)))])),
                         IconButton.filledTonal(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CallPage(video: false))), icon: const Icon(Icons.call_rounded)),
@@ -688,14 +796,34 @@ class _ChatPageState extends State<ChatPage> {
                   },
                 ),
               ),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: menuOpen
+                    ? Container(
+                        key: const ValueKey('media-menu'),
+                        margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: Colors.white.withOpacity(.08), borderRadius: BorderRadius.circular(22)),
+                        child: Row(
+                          children: [
+                            Expanded(child: FilledButton.tonalIcon(onPressed: sendImage, icon: const Icon(Icons.image_rounded), label: const Text('Foto'))),
+                            const SizedBox(width: 10),
+                            Expanded(child: FilledButton.tonalIcon(onPressed: sendVideo, icon: const Icon(Icons.movie_rounded), label: const Text('Vídeo'))),
+                          ],
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
               Container(
                 padding: const EdgeInsets.all(10),
                 color: Colors.black.withOpacity(.22),
                 child: Row(
                   children: [
-                    IconButton.filledTonal(onPressed: () => toast(context, 'Foto, vídeo e áudio entram na próxima atualização.'), icon: const Icon(Icons.add_rounded)),
+                    IconButton.filledTonal(onPressed: () => setState(() => menuOpen = !menuOpen), icon: Icon(menuOpen ? Icons.close_rounded : Icons.add_rounded)),
                     const SizedBox(width: 8),
                     Expanded(child: TextField(controller: controller, minLines: 1, maxLines: 4, decoration: field('Mensagem criptografada...', Icons.lock_rounded), onSubmitted: (_) => send())),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(onPressed: toggleVoice, icon: Icon(recording ? Icons.stop_rounded : Icons.mic_rounded, color: recording ? Colors.redAccent : null)),
                     const SizedBox(width: 8),
                     IconButton.filled(onPressed: sending ? null : send, icon: sending ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.send_rounded)),
                   ],
@@ -709,16 +837,63 @@ class _ChatPageState extends State<ChatPage> {
   }
 }
 
-class MessageBubble extends StatelessWidget {
+class MessageBubble extends StatefulWidget {
   const MessageBubble({super.key, required this.chatId, required this.message, required this.chat});
   final String chatId;
   final Map<String, dynamic> message;
   final ChatService chat;
 
-  bool get mine => message['sender_id'] == uid;
+  @override
+  State<MessageBubble> createState() => _MessageBubbleState();
+}
+
+class _MessageBubbleState extends State<MessageBubble> {
+  Uint8List? image;
+  bool loading = false;
+  AudioPlayer? player;
+
+  bool get mine => widget.message['sender_id'] == uid;
+
+  @override
+  void dispose() {
+    player?.dispose();
+    super.dispose();
+  }
+
+  Future<void> openMedia() async {
+    setState(() => loading = true);
+    try {
+      final bytes = await widget.chat.downloadMedia(widget.chatId, widget.message);
+      final type = widget.message['type']?.toString() ?? '';
+      if (type == 'image') {
+        setState(() => image = bytes);
+      } else {
+        final dir = await getTemporaryDirectory();
+        final name = widget.message['file_name']?.toString() ?? 'media.bin';
+        final file = File('${dir.path}/$name');
+        await file.writeAsBytes(bytes);
+        if (type == 'audio') {
+          player ??= AudioPlayer();
+          await player!.setFilePath(file.path);
+          await player!.play();
+        } else {
+          if (mounted) toast(context, 'Vídeo descriptografado em: ${file.path}');
+        }
+      }
+    } catch (e) {
+      if (mounted) toast(context, 'Erro ao abrir mídia: $e');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final type = widget.message['type']?.toString() ?? 'text';
+    final isText = type == 'text';
+    final icon = type == 'audio' ? Icons.graphic_eq_rounded : type == 'video' ? Icons.movie_rounded : Icons.image_rounded;
+    final label = type == 'audio' ? 'Tocar áudio' : type == 'video' ? 'Abrir vídeo' : 'Abrir foto';
+
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -730,10 +905,21 @@ class MessageBubble extends StatelessWidget {
           color: mine ? null : Colors.white.withOpacity(.09),
           borderRadius: BorderRadius.only(topLeft: const Radius.circular(22), topRight: const Radius.circular(22), bottomLeft: Radius.circular(mine ? 22 : 6), bottomRight: Radius.circular(mine ? 6 : 22)),
         ),
-        child: FutureBuilder<String>(
-          future: chat.decrypt(chatId, message),
-          builder: (context, snap) => Text(snap.data ?? '...', style: const TextStyle(fontSize: 15.5)),
-        ),
+        child: isText
+            ? FutureBuilder<String>(future: widget.chat.decrypt(widget.chatId, widget.message), builder: (context, snap) => Text(snap.data ?? '...', style: const TextStyle(fontSize: 15.5)))
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (image != null)
+                    ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.memory(image!, fit: BoxFit.cover))
+                  else ...[
+                    Row(mainAxisSize: MainAxisSize.min, children: [Icon(icon), const SizedBox(width: 8), Flexible(child: Text(widget.message['file_name']?.toString() ?? 'mídia criptografada', overflow: TextOverflow.ellipsis))]),
+                    const SizedBox(height: 8),
+                    FilledButton.tonalIcon(onPressed: loading ? null : openMedia, icon: loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : Icon(type == 'audio' ? Icons.play_arrow_rounded : Icons.lock_open_rounded), label: Text(label)),
+                  ],
+                ],
+              ),
       ),
     );
   }
@@ -742,6 +928,7 @@ class MessageBubble extends StatelessWidget {
 class CallPage extends StatelessWidget {
   const CallPage({super.key, required this.video});
   final bool video;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -751,13 +938,7 @@ class CallPage extends StatelessWidget {
             padding: const EdgeInsets.all(18),
             child: Column(
               children: [
-                Row(
-                  children: [
-                    IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back_rounded)),
-                    Expanded(child: Text(video ? 'Chamada de vídeo' : 'Chamada de áudio', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900))),
-                    const Icon(Icons.lock_rounded),
-                  ],
-                ),
+                Row(children: [IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back_rounded)), Expanded(child: Text(video ? 'Chamada de vídeo' : 'Chamada de áudio', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900))), const Icon(Icons.lock_rounded)]),
                 const SizedBox(height: 20),
                 Expanded(
                   child: Container(
@@ -770,10 +951,7 @@ class CallPage extends StatelessWidget {
                         const SizedBox(height: 18),
                         Text(video ? 'Base de vídeo pronta' : 'Base de áudio pronta', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
                         const SizedBox(height: 8),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 28),
-                          child: Text('O próximo update completa a negociação WebRTC de aceitar/recusar chamada.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withOpacity(.7))),
-                        ),
+                        Padding(padding: const EdgeInsets.symmetric(horizontal: 28), child: Text('O próximo update completa a negociação WebRTC de aceitar/recusar chamada.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withOpacity(.7)))),
                       ],
                     ),
                   ),
